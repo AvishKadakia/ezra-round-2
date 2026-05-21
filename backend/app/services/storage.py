@@ -68,19 +68,38 @@ def _safe_storage_message(operation: str, error: BaseException) -> str:
     return f"Blob storage {operation} failed: {type(error).__name__}: {error_text[:300]}"
 
 
+def validate_storage_settings() -> None:
+    missing = []
+    if not settings.s3_endpoint_url:
+        missing.append("S3_ENDPOINT_URL or BUCKET_ENDPOINT")
+    if not settings.s3_bucket_name:
+        missing.append("S3_BUCKET_NAME or BUCKET_NAME")
+    if not settings.s3_access_key_id:
+        missing.append("S3_ACCESS_KEY_ID or AWS_ACCESS_KEY_ID")
+    if not settings.s3_secret_access_key:
+        missing.append("S3_SECRET_ACCESS_KEY or AWS_SECRET_ACCESS_KEY")
+
+    if missing:
+        raise StorageError(
+            "Blob storage config is incomplete. Missing: "
+            + ", ".join(missing)
+            + ". Use Railway bucket credential auto-injection or set these variables manually."
+        )
+
+
 def s3_client():
-    # Short timeouts prevent a bad endpoint/bucket configuration from leaving the
-    # Publish modal stuck in “Uploading...” for a long time.
+    validate_storage_settings()
+
     return boto3.client(
         "s3",
         endpoint_url=settings.s3_endpoint_url,
         aws_access_key_id=settings.s3_access_key_id,
         aws_secret_access_key=settings.s3_secret_access_key,
-        region_name=settings.s3_region,
+        region_name=settings.s3_region or "auto",
         verify=_s3_verify_value(),
         config=Config(
             signature_version="s3v4",
-            s3={"addressing_style": "path"},
+            s3={"addressing_style": settings.s3_addressing_style or "auto"},
             connect_timeout=settings.s3_connect_timeout_seconds,
             read_timeout=settings.s3_read_timeout_seconds,
             retries={"max_attempts": settings.s3_max_attempts, "mode": "standard"},
@@ -88,38 +107,14 @@ def s3_client():
     )
 
 
-def upload_fileobj(fileobj, object_key: str, content_type: str | None = None) -> None:
-    """
-    Upload one already-validated file to blob storage.
-
-    Since the app caps files at 10 MB, a single put_object call is safer than
-    managed multipart upload for S3-compatible providers.
-    """
+def upload_fileobj(key: str, file_obj: BinaryIO, content_type: str) -> None:
     try:
-        fileobj.seek(0)
-        body = fileobj.read()
-
-        if len(body) > settings:
-            raise StorageError("File is larger than the 10 MB upload limit.")
-
-        get_storage_client().put_object(
-            Bucket=settings.bucket_name,
-            Key=object_key,
-            Body=body,
-            ContentType=content_type or "application/octet-stream",
-        )
-
-    except ClientError as exc:
-        code = exc.response.get("Error", {}).get("Code", "Unknown")
-        message = exc.response.get("Error", {}).get("Message", str(exc))
-        raise StorageError(
-            f"Blob storage upload failed: {code} - {message}. "
-            "Check bucket name, endpoint, and write permissions."
-        ) from exc
-
-    except BotoCoreError as exc:
-        raise StorageError(f"Blob storage upload failed: {exc}") from exc
-
+        extra_args = {"ContentType": content_type}
+        s3_client().upload_fileobj(file_obj, settings.s3_bucket_name, key, ExtraArgs=extra_args)
+    except StorageError:
+        raise
+    except (BotoCoreError, ClientError) as exc:
+        raise StorageError(_safe_storage_message("upload", exc)) from exc
 
 def upload_bytes(key: str, data: bytes, content_type: str) -> None:
     try:
