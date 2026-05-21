@@ -189,3 +189,36 @@ def iter_streaming_body(body, chunk_size: int = 1024 * 256):
 def make_api_file_url(artifact_id: str) -> str:
     base = settings.public_api_base_url.rstrip("/")
     return f"{base}/files/{artifact_id}" if base else f"/files/{artifact_id}"
+
+def delete_prefix(prefix: str = "artifacts/") -> int:
+    """Delete all objects under a storage prefix.
+
+    Used only by protected admin tooling for staging resets.
+    """
+
+    client = s3_client()
+    deleted_count = 0
+
+    try:
+        paginator = client.get_paginator("list_objects_v2")
+
+        for page in paginator.paginate(Bucket=settings.s3_bucket_name, Prefix=prefix):
+            objects = [{"Key": item["Key"]} for item in page.get("Contents", [])]
+
+            if not objects:
+                continue
+
+            for index in range(0, len(objects), 1000):
+                batch = objects[index : index + 1000]
+                client.delete_objects(
+                    Bucket=settings.s3_bucket_name,
+                    Delete={"Objects": batch, "Quiet": True},
+                )
+                deleted_count += len(batch)
+
+        return deleted_count
+
+    except StorageError:
+        raise
+    except (BotoCoreError, ClientError) as exc:
+        raise StorageError(_safe_storage_message("delete", exc)) from exc

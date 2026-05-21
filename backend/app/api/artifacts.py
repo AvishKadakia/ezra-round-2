@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Annotated, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 from PIL import Image
 from sqlalchemy import String, cast, func, or_, select
@@ -33,7 +33,7 @@ from app.schemas import (
 )
 from app.services.queue import enqueue_artifact_processing, recover_stale_jobs
 from app.services.feedback import generate_feedback_summary
-from app.services.storage import StorageError, get_object_response, iter_streaming_body, make_api_file_url, upload_fileobj
+from app.services.storage import StorageError, delete_prefix, get_object_response, iter_streaming_body, make_api_file_url, upload_fileobj
 
 router = APIRouter()
 settings = get_settings()
@@ -272,6 +272,59 @@ async def create_one_artifact(
     finally:
         temp_path.unlink(missing_ok=True)
 
+@router.post("/admin/nuke")
+def nuke_everything(
+    confirm: str,
+    include_database: bool = True,
+    include_storage: bool = True,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    db: Session = Depends(get_db),
+):
+    """Dangerous staging-only reset endpoint.
+
+    Requires:
+    - ALLOW_ADMIN_NUKE=true
+    - ADMIN_NUKE_TOKEN set
+    - X-Admin-Token header
+    - confirm=NUKE_ARTIFACT_HUB_DATA
+    """
+
+    if not settings.allow_admin_nuke:
+        raise HTTPException(status_code=403, detail="Admin nuke is disabled")
+
+    if not settings.admin_nuke_token:
+        raise HTTPException(status_code=403, detail="ADMIN_NUKE_TOKEN is not configured")
+
+    if not secrets.compare_digest(x_admin_token or "", settings.admin_nuke_token):
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+
+    if confirm != "NUKE_ARTIFACT_HUB_DATA":
+        raise HTTPException(status_code=400, detail="Invalid confirmation phrase")
+
+    deleted_storage_objects = 0
+
+    if include_storage:
+        try:
+            deleted_storage_objects = delete_prefix("artifacts/")
+        except StorageError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    deleted_database_rows = {}
+
+    if include_database:
+        deleted_database_rows["comments"] = db.query(Comment).delete()
+        deleted_database_rows["processing_jobs"] = db.query(ProcessingJob).delete()
+        deleted_database_rows["share_links"] = db.query(ShareLink).delete()
+        deleted_database_rows["artifacts"] = db.query(Artifact).delete()
+        db.commit()
+
+    return {
+        "ok": True,
+        "databaseNuked": include_database,
+        "storageNuked": include_storage,
+        "deletedDatabaseRows": deleted_database_rows,
+        "deletedStorageObjects": deleted_storage_objects,
+    }
 
 @router.get("/metrics", response_model=MetricsOut)
 def metrics(db: Session = Depends(get_db)):

@@ -58,7 +58,8 @@ class Settings(BaseSettings):
     frontend_base_url: str = "http://localhost:5173"
     mcp_public_url: str = ""
     cors_origins: str = "http://localhost:5173,http://localhost:5174,http://localhost:4173"
-
+    allow_admin_nuke: bool = False
+    admin_nuke_token: str = ""
     openai_api_key: str = ""
     openai_model: str = "gpt-4.1-mini"
 
