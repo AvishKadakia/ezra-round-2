@@ -8,8 +8,8 @@ const filterOptions: FilterOption[] = [
   { label: "Images", type: "image" },
   { label: "PDFs", type: "pdf" },
   { label: "Processing", status: "processing" },
-  { label: "Ready", status: "ready" },
-  { label: "Failed", status: "failed" },
+  // { label: "Ready", status: "ready" },
+  // { label: "Failed", status: "failed" },
 ];
 
 export function GalleryFilters({ active, onChange }: { active: ArtifactListParams; onChange: (next: ArtifactListParams) => void }) {
