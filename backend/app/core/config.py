@@ -82,7 +82,17 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
+    mcp_allowed_hosts: str = ""
+    mcp_allowed_origins: str = "http://localhost:6274,http://127.0.0.1:6274"
+    mcp_disable_dns_rebinding_protection: bool = False
 
+    @property
+    def mcp_allowed_host_list(self) -> list[str]:
+        return [host.strip() for host in self.mcp_allowed_hosts.split(",") if host.strip()]
+
+    @property
+    def mcp_allowed_origin_list(self) -> list[str]:
+        return [origin.strip() for origin in self.mcp_allowed_origins.split(",") if origin.strip()]
     @field_validator("s3_endpoint_url")
     @classmethod
     def normalize_s3_endpoint(cls, value: str) -> str:

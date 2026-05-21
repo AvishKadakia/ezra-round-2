@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
+from urllib.parse import urlparse
 
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.server.fastmcp import FastMCP
 from sqlalchemy import func, select
 
@@ -14,6 +16,54 @@ from app.services.queue import enqueue_artifact_processing, recover_stale_jobs
 
 settings = get_settings()
 
+def _host_from_url(url: str) -> str | None:
+    if not url:
+        return None
+
+    parsed = urlparse(url)
+    host = parsed.netloc or parsed.path
+    host = host.strip().strip("/")
+    return host or None
+
+
+def _allowed_hosts() -> list[str]:
+    hosts = {
+        "localhost:*",
+        "127.0.0.1:*",
+        "0.0.0.0:*",
+    }
+
+    for value in [
+        settings.public_api_base_url,
+        settings.mcp_public_url,
+    ]:
+        host = _host_from_url(value)
+        if host:
+            hosts.add(host)
+            hosts.add(f"{host}:*")
+
+    for host in settings.mcp_allowed_host_list:
+        hosts.add(host)
+        if ":" not in host:
+            hosts.add(f"{host}:*")
+
+    return sorted(hosts)
+
+
+def _allowed_origins() -> list[str]:
+    origins = {
+        "http://localhost:6274",
+        "http://127.0.0.1:6274",
+        "http://localhost:*",
+        "http://127.0.0.1:*",
+    }
+
+    for origin in settings.mcp_allowed_origin_list:
+        origins.add(origin)
+
+    return sorted(origins)
+
+
 mcp = FastMCP(
     name="Artifact Hub Agent MCP",
     instructions=(
@@ -23,6 +73,11 @@ mcp = FastMCP(
     ),
     stateless_http=True,
     json_response=True,
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=not settings.mcp_disable_dns_rebinding_protection,
+        allowed_hosts=_allowed_hosts(),
+        allowed_origins=_allowed_origins(),
+    ),
 )
 # Mount this server at /mcp without requiring a nested /mcp path.
 mcp.settings.streamable_http_path = "/"
