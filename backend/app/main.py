@@ -57,6 +57,7 @@ def mcp_config():
             "queue_document_processing",
             "create_review_share_link",
             "plan_artifact_review_work",
+            "publish_artifact_from_base64",
         ],
         "claude": {
             "directUrl": url,

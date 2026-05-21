@@ -3,6 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 from urllib.parse import urlparse
+import base64
+import binascii
+import tempfile
+from pathlib import Path
+
 
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.server.fastmcp import FastMCP
@@ -13,6 +18,17 @@ from app.db.session import SessionLocal
 from app.models import Artifact, Comment, ProcessingJob, ShareLink
 from app.services.feedback import generate_feedback_summary
 from app.services.queue import enqueue_artifact_processing, recover_stale_jobs
+from app.services.storage import StorageError, upload_fileobj
+from app.api.artifacts import (
+    ALLOWED_IMAGE_EXTENSIONS,
+    ALLOWED_PDF_EXTENSIONS,
+    MAX_TITLE_PREFIX_CHARS,
+    build_artifact_id,
+    build_artifact_title,
+    detect_artifact_type,
+    parse_tags,
+    truncate_text,
+)
 
 settings = get_settings()
 
@@ -352,6 +368,148 @@ def create_review_share_link(
     finally:
         db.close()
 
+def _safe_mcp_filename(filename: str) -> str:
+    name = Path(filename or "mcp-artifact").name
+    suffix = Path(name).suffix.lower()
+
+    if suffix not in ALLOWED_IMAGE_EXTENSIONS and suffix not in ALLOWED_PDF_EXTENSIONS:
+        raise ValueError("Only image files and PDFs are supported.")
+
+    return name
+
+
+def _content_type_from_filename(filename: str) -> str:
+    suffix = Path(filename).suffix.lower()
+
+    if suffix == ".pdf":
+        return "application/pdf"
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".png":
+        return "image/png"
+    if suffix == ".webp":
+        return "image/webp"
+    if suffix == ".gif":
+        return "image/gif"
+
+    return "application/octet-stream"
+
+
+def _decode_base64_file(file_base64: str) -> bytes:
+    cleaned = file_base64.strip()
+
+    # Accept normal base64 and data URLs like:
+    # data:application/pdf;base64,JVBERi0x...
+    if "," in cleaned and cleaned.lower().startswith("data:"):
+        cleaned = cleaned.split(",", 1)[1]
+
+    try:
+        return base64.b64decode(cleaned, validate=True)
+    except binascii.Error as exc:
+        raise ValueError("file_base64 is not valid base64.") from exc
+
+
+@mcp.tool(title="Publish artifact from base64 file")
+def publish_artifact_from_base64(
+    filename: str,
+    file_base64: str,
+    title_prefix: str = "",
+    description: str = "",
+    category: str = "general",
+    tags: list[str] | None = None,
+    owner_name: str = "MCP agent",
+) -> dict:
+    """Upload a local file through remote MCP using base64 content.
+
+    This is the no-local-setup upload path for chatbots. The user attaches a file
+    to the chatbot; the agent passes the file name and base64 bytes to this tool.
+    The backend validates the file, stores it in blob storage, creates the artifact,
+    and queues background summarization.
+    """
+
+    temp_path: Path | None = None
+    db = SessionLocal()
+
+    try:
+        filename = _safe_mcp_filename(filename)
+
+        if len(title_prefix.strip()) > MAX_TITLE_PREFIX_CHARS:
+            return {
+                "ok": False,
+                "error": f"title_prefix must be {MAX_TITLE_PREFIX_CHARS} characters or fewer",
+            }
+
+        file_bytes = _decode_base64_file(file_base64)
+
+        if not file_bytes:
+            return {"ok": False, "error": "Uploaded file is empty."}
+
+        if len(file_bytes) > settings.max_upload_bytes:
+            return {
+                "ok": False,
+                "error": f"File exceeds the {settings.max_upload_bytes // (1024 * 1024)} MB upload limit.",
+            }
+
+        suffix = Path(filename).suffix.lower()[:20]
+        with tempfile.NamedTemporaryFile(prefix="mcp-upload-", suffix=suffix, delete=False) as temp:
+            temp.write(file_bytes)
+            temp.flush()
+            temp_path = Path(temp.name)
+
+        content_type = _content_type_from_filename(filename)
+        artifact_type = detect_artifact_type(temp_path, filename, content_type)
+
+        final_title = build_artifact_title(title_prefix.strip(), filename, multiple=False)
+        artifact_id = build_artifact_id(final_title)
+        object_key = f"artifacts/{artifact_id}{suffix}"
+
+        try:
+            with temp_path.open("rb") as buffer:
+                upload_fileobj(object_key, buffer, content_type)
+        except StorageError as exc:
+            return {"ok": False, "error": str(exc)}
+
+        parsed_tags = parse_tags(",".join(tags or []))
+
+        artifact = Artifact(
+            id=artifact_id,
+            title=final_title,
+            description=description.strip(),
+            type=artifact_type,
+            tags=parsed_tags,
+            category=truncate_text(category.strip() or "general", 120),
+            owner_name=truncate_text(owner_name.strip() or "MCP agent", 160),
+            status="processing",
+            object_key=object_key,
+            original_filename=filename,
+            content_type=content_type,
+            file_size=len(file_bytes),
+            document_summary="Queued for background processing.",
+            page_summaries=[],
+        )
+
+        db.add(artifact)
+        db.flush()
+        enqueue_artifact_processing(db, artifact.id)
+        db.commit()
+        db.refresh(artifact)
+
+        return {
+            "ok": True,
+            "message": "Artifact uploaded through MCP and queued for processing.",
+            "artifact": _artifact_brief(db, artifact),
+        }
+
+    except ValueError as exc:
+        db.rollback()
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        db.rollback()
+        return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:500]}"}
+    finally:
+        db.close()
+        if temp_path:
+            temp_path.unlink(missing_ok=True)
 
 @mcp.tool(title="Plan artifact review work")
 def plan_artifact_review_work(goal: str, query: str = "", limit: int = 8) -> dict:
