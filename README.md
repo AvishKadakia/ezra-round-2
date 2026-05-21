@@ -58,6 +58,9 @@ flowchart TD
 ├── README.md
 └── WRITEUP.md
 ```
+### Railway Prod Deployment
+<img width="1405" height="836" alt="Screenshot 2026-05-21 at 1 36 34 PM" src="https://github.com/user-attachments/assets/eae52423-bdad-4ced-ba44-ab4fbb2d213c" />
+
 
 ## MCP Configuration
 
@@ -101,7 +104,7 @@ url = "https://backend-api-production-a545.up.railway.app/mcp"
 ### MCP Capabilities
 
 
-| MCP Tool                       | One-line description                                                                                               |
+| MCP Tool                       | Description                                                                                               |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
 | `search_artifacts_for_review`  | Search the artifact gallery and return review-ready artifact context based on query, type, status, or limit.       |
 | `get_artifact_review_brief`    | Fetch a complete review brief for one artifact, including metadata, summaries, comments, status, and next actions. |
